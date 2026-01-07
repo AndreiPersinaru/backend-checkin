@@ -216,8 +216,7 @@ class CheckInViewSet(viewsets.ModelViewSet):
         })
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
 def health_check(request):
     """Endpoint pentru verificarea stării aplicației"""
-    return Response({'status': 'ok'})
+    from django.http import JsonResponse
+    return JsonResponse({'status': 'ok'})
