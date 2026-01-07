@@ -24,7 +24,7 @@ primary_region = 'fra'
     timeout = '5s'
     grace_period = '10s'
     method = 'GET'
-    path = '/api/athletes/'
+    path = '/api/health/'
 
 [[vm]]
   memory = '1gb'

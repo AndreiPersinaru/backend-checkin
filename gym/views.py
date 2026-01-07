@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.db.models import Count, Q
 from django.utils import timezone
 from django.contrib.auth.models import User
+from django.http import JsonResponse
 from .models import TrainingSession, Athlete, CheckIn
 from .serializers import (
     TrainingSessionSerializer, 
@@ -19,11 +20,14 @@ from .user_serializers import (
     UserCreateSerializer,
     UserUpdateSerializer
 )
-from .user_serializers import (
-    UserSerializer,
-    UserCreateSerializer,
-    UserUpdateSerializer
-)
+
+
+# Health check endpoint pentru deployment
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def health_check(request):
+    """Endpoint simplu pentru health checks - fără autentificare"""
+    return JsonResponse({'status': 'ok'})
 
 
 class IsAdminUser(permissions.BasePermission):
