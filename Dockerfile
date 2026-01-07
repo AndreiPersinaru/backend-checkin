@@ -23,6 +23,5 @@ COPY . /app/
 # Collect static files
 RUN python manage.py collectstatic --noinput || true
 
-# Run migrations and start server (bind to $PORT for PaaS like Railway)
-CMD python manage.py migrate && \
-    gunicorn config.wsgi:application -b 0.0.0.0:${PORT:-8000} --workers 3
+# Start server only (migrations run via release_command in fly.toml)
+CMD gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 30
