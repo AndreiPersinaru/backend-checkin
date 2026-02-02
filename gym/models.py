@@ -3,6 +3,8 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 from django.core.validators import RegexValidator
 from django.core.exceptions import ValidationError
+import random
+import string
 
 
 class TrainingSession(models.Model):
@@ -92,22 +94,26 @@ class TrainingSession(models.Model):
 class Athlete(models.Model):
     """Model pentru sportivi"""
     
-    # Validator pentru număr de telefon românesc
-    phone_regex = RegexValidator(
-        regex=r'^07\d{8}$',
-        message="Numărul de telefon trebuie să fie format din 10 cifre și să înceapă cu 07 (ex: 0712345678)"
-    )
-    
     name = models.CharField(max_length=200, verbose_name="Nume")
-    phone_number = models.CharField(
-        max_length=10, 
-        unique=True, 
-        validators=[phone_regex],
-        verbose_name="Număr de telefon",
-        help_text="Format: 07XXXXXXXX (10 cifre)"
+    pin = models.CharField(
+        max_length=6, 
+        unique=True,
+        null=True,
+        blank=True,
+        verbose_name="PIN (6 cifre)",
+        help_text="PIN unic de 6 cifre pentru verificare"
     )
     subscription_active = models.BooleanField(default=True, verbose_name="Abonament lunar activ")
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Legacy field - pentru migrare graduală, va deveni deprecated
+    phone_number = models.CharField(
+        max_length=10,
+        null=True,
+        blank=True,
+        verbose_name="Număr de telefon (legacy)",
+        help_text="Nu mai este folosit, doar pentru migrare"
+    )
     
     class Meta:
         verbose_name = "Sportiv"
@@ -115,7 +121,7 @@ class Athlete(models.Model):
         ordering = ['name']
     
     def __str__(self):
-        return f"{self.name} ({self.phone_number})"
+        return f"{self.name} (PIN: {self.pin})"
     
     def get_checkins_for_month(self, year, month):
         """Returnează numărul de check-in-uri pentru o lună specificată"""
@@ -123,6 +129,64 @@ class Athlete(models.Model):
             timestamp__year=year,
             timestamp__month=month
         ).count()
+
+
+class PhoneNumber(models.Model):
+    """Model pentru numere de telefon"""
+    
+    phone_regex = RegexValidator(
+        regex=r'^07\d{8}$',
+        message="Numărul de telefon trebuie să fie format din 10 cifre și să înceapă cu 07 (ex: 0712345678)"
+    )
+    
+    phone_number = models.CharField(
+        max_length=10, 
+        unique=True, 
+        validators=[phone_regex],
+        verbose_name="Număr de telefon",
+        help_text="Format: 07XXXXXXXX (10 cifre)"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = "Număr de telefon"
+        verbose_name_plural = "Numere de telefon"
+        ordering = ['phone_number']
+    
+    def __str__(self):
+        return self.phone_number
+
+
+class PhoneAthlete(models.Model):
+    """Model de legătură many-to-many între PhoneNumber și Athlete"""
+    
+    phone_number = models.ForeignKey(
+        PhoneNumber,
+        on_delete=models.CASCADE,
+        related_name='athletes',
+        verbose_name="Număr de telefon"
+    )
+    athlete = models.ForeignKey(
+        Athlete,
+        on_delete=models.CASCADE,
+        related_name='phone_numbers',
+        verbose_name="Sportiv"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True, verbose_name="Data verificării PIN")
+    
+    class Meta:
+        unique_together = ('phone_number', 'athlete')
+        verbose_name = "Asociere telefon-sportiv"
+        verbose_name_plural = "Asocieri telefon-sportiv"
+        ordering = ['phone_number', 'athlete']
+    
+    def __str__(self):
+        return f"{self.phone_number} → {self.athlete.name}"
+    
+    @property
+    def is_verified(self):
+        return self.verified_at is not None
 
 
 class CheckIn(models.Model):
@@ -139,8 +203,8 @@ class CheckIn(models.Model):
         related_name='checkins',
         verbose_name="Sesiune antrenament"
     )
-    timestamp = models.DateTimeField(auto_now_add=True, verbose_name="Ora check-in")
-    checkin_date = models.DateField(auto_now_add=True, verbose_name="Data check-in")
+    timestamp = models.DateTimeField(default=timezone.now, verbose_name="Ora check-in")
+    checkin_date = models.DateField(default=timezone.localdate, verbose_name="Data check-in")
     
     class Meta:
         verbose_name = "Check-in"
@@ -156,3 +220,72 @@ class CheckIn(models.Model):
     
     def __str__(self):
         return f"{self.athlete.name} - {self.training_session.name} - {self.timestamp.strftime('%Y-%m-%d %H:%M')}"
+
+
+class AppSettings(models.Model):
+    """Model pentru setări generale ale aplicației"""
+    
+    subscription_cost = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=75.00,
+        verbose_name="Cost abonament lunar"
+    )
+    session_cost = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=20.00,
+        verbose_name="Cost per sesiune"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "Setări aplicație"
+        verbose_name_plural = "Setări aplicație"
+    
+    def __str__(self):
+        return "Setări globale"
+    
+    @classmethod
+    def get_settings(cls):
+        """Returnează singura instanță de setări (singleton)"""
+        return cls.objects.first() or cls.objects.create()
+
+
+class AthletePayment(models.Model):
+    """Model pentru plăți ale sportivilor pe luni"""
+    
+    PAYMENT_CHOICES = [
+        ('cash', 'Cash'),
+        ('card', 'Card'),
+    ]
+    
+    athlete = models.ForeignKey(
+        Athlete, 
+        on_delete=models.CASCADE, 
+        related_name='payments',
+        verbose_name="Sportiv"
+    )
+    year = models.IntegerField(verbose_name="An")
+    month = models.IntegerField(verbose_name="Lună (1-12)")
+    paid = models.BooleanField(default=False, verbose_name="Plătit")
+    payment_method = models.CharField(
+        max_length=10, 
+        choices=PAYMENT_CHOICES, 
+        null=True, 
+        blank=True,
+        verbose_name="Metoda de plată"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('athlete', 'year', 'month')
+        verbose_name = "Plată sportiv"
+        verbose_name_plural = "Plăți sportivi"
+        ordering = ['-year', '-month', 'athlete']
+    
+    def __str__(self):
+        status = "Plătit" if self.paid else "Neplătit"
+        return f"{self.athlete.name} - {self.month}/{self.year} ({status})"

@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import TrainingSession, Athlete, CheckIn
+from .models import (
+    TrainingSession, Athlete, CheckIn, 
+    PhoneNumber, PhoneAthlete, AppSettings, AthletePayment
+)
 from django.utils import timezone
 from datetime import timedelta
 
@@ -34,7 +37,7 @@ class TrainingSessionSerializer(serializers.ModelSerializer):
 class AthleteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Athlete
-        fields = ['id', 'name', 'phone_number', 'subscription_active', 'created_at']
+        fields = ['id', 'name', 'pin', 'subscription_active', 'created_at']
 
 
 class CheckInSerializer(serializers.ModelSerializer):
@@ -52,9 +55,10 @@ class CheckInSerializer(serializers.ModelSerializer):
 
 
 class CheckInCreateSerializer(serializers.Serializer):
-    """Serializer pentru crearea unui check-in prin număru de telefon și eventual nume"""
+    """Serializer pentru crearea unui check-in prin număr de telefon și eventual nume sau athlete_id"""
     phone_number = serializers.CharField(max_length=10)
     athlete_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    athlete_id = serializers.IntegerField(required=False)
     
     def validate_phone_number(self, value):
         """Validează formatul numărului de telefon"""
@@ -108,7 +112,17 @@ class CheckInCreateSerializer(serializers.Serializer):
         # Folosește primul antrenament valid găsit
         data['training_session'] = valid_sessions[0]
         
-        # Verifică dacă atletul există deja
+        # Dacă avem athlete_id, îl folosim direct
+        if 'athlete_id' in data and data['athlete_id']:
+            try:
+                athlete = Athlete.objects.get(id=data['athlete_id'])
+                data['athlete'] = athlete
+                data['is_new_athlete'] = False
+                return data
+            except Athlete.DoesNotExist:
+                raise serializers.ValidationError("Sportivul cu acest ID nu există.")
+        
+        # Verifică dacă atletul există deja (legacy flow cu phone_number)
         phone_number = data['phone_number']
         athlete = Athlete.objects.filter(phone_number=phone_number).first()
         
@@ -174,3 +188,123 @@ class MonthlyStatsSerializer(serializers.Serializer):
     year = serializers.IntegerField()
     month = serializers.IntegerField()
     athletes = AthleteStatsSerializer(many=True)
+
+
+# ============= NEW SERIALIZERS FOR PHONE/ATHLETE WORKFLOW =============
+
+class PhoneNumberSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PhoneNumber
+        fields = ['id', 'phone_number', 'created_at']
+
+
+class PhoneAthleteSerializer(serializers.ModelSerializer):
+    athlete_name = serializers.CharField(source='athlete.name', read_only=True)
+    athlete_pin = serializers.CharField(source='athlete.pin', read_only=True)
+    phone_number = serializers.CharField(source='phone_number.phone_number', read_only=True)
+    
+    class Meta:
+        model = PhoneAthlete
+        fields = ['id', 'phone_number', 'athlete', 'athlete_name', 'athlete_pin', 'created_at', 'verified_at']
+        read_only_fields = ['created_at', 'verified_at']
+
+
+class AthleteSimpleSerializer(serializers.ModelSerializer):
+    """Serializer simplificat pentru Athlete cu PIN"""
+    class Meta:
+        model = Athlete
+        fields = ['id', 'name', 'pin', 'subscription_active', 'created_at']
+
+
+class AppSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppSettings
+        fields = ['id', 'subscription_cost', 'session_cost', 'updated_at']
+
+
+class AthletePaymentSerializer(serializers.ModelSerializer):
+    athlete_name = serializers.CharField(source='athlete.name', read_only=True)
+    
+    class Meta:
+        model = AthletePayment
+        fields = [
+            'id', 'athlete', 'athlete_name', 
+            'year', 'month', 'paid', 'payment_method', 
+            'created_at', 'updated_at'
+        ]
+
+
+class PhoneCheckInRequestSerializer(serializers.Serializer):
+    """Serializer pentru cererea inițială de check-in cu număr de telefon"""
+    phone_number = serializers.CharField(max_length=10)
+    
+    def validate_phone_number(self, value):
+        """Validează formatul numărului de telefon"""
+        value = ''.join(filter(str.isdigit, value))
+        if len(value) != 10:
+            raise serializers.ValidationError("Numărul de telefon trebuie să aibă exact 10 cifre.")
+        if not value.startswith('07'):
+            raise serializers.ValidationError("Numărul de telefon trebuie să înceapă cu 07.")
+        return value
+
+
+class PhoneAthleteListSerializer(serializers.Serializer):
+    """Response cu lista de sportivi asociați unui număr de telefon"""
+    phone_number = serializers.CharField()
+    athletes = PhoneAthleteSerializer(many=True, read_only=True, source='athletes.all')
+    
+    def to_representation(self, instance):
+        """Convertim PhoneNumber instance în dict cu athletes"""
+        return {
+            'phone_number': instance.phone_number,
+            'athletes': PhoneAthleteSerializer(instance.athletes.all(), many=True).data
+        }
+
+
+class NewPhoneAthleteAssociationSerializer(serializers.Serializer):
+    """Serializer pentru asocierea unui noul sportiv cu un număr de telefon (cu PIN verificare)"""
+    phone_number = serializers.CharField(max_length=10)
+    athlete_pin = serializers.CharField(max_length=6)
+    
+    def validate_phone_number(self, value):
+        value = ''.join(filter(str.isdigit, value))
+        if len(value) != 10:
+            raise serializers.ValidationError("Numărul de telefon trebuie să aibă exact 10 cifre.")
+        if not value.startswith('07'):
+            raise serializers.ValidationError("Numărul de telefon trebuie să înceapă cu 07.")
+        return value
+    
+    def validate(self, data):
+        phone_number = data['phone_number']
+        athlete_pin = data['athlete_pin']
+        
+        # Verifică dacă atletul există cu PIN-ul dat
+        try:
+            athlete = Athlete.objects.get(pin=athlete_pin)
+        except Athlete.DoesNotExist:
+            raise serializers.ValidationError("PIN-ul introdus nu este valid.")
+        
+        # Verifică dacă telefonul există
+        try:
+            phone_obj = PhoneNumber.objects.get(phone_number=phone_number)
+        except PhoneNumber.DoesNotExist:
+            raise serializers.ValidationError("Numărul de telefon nu există.")
+        
+        # Verifică dacă asocierea deja există
+        if PhoneAthlete.objects.filter(phone_number=phone_obj, athlete=athlete).exists():
+            raise serializers.ValidationError("Sportivul este deja asociat cu acest număr de telefon.")
+        
+        data['phone_obj'] = phone_obj
+        data['athlete'] = athlete
+        return data
+    
+    def create(self, validated_data):
+        phone_obj = validated_data['phone_obj']
+        athlete = validated_data['athlete']
+        
+        phone_athlete = PhoneAthlete.objects.create(
+            phone_number=phone_obj,
+            athlete=athlete,
+            verified_at=timezone.now()
+        )
+        return phone_athlete
